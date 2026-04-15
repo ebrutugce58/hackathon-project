@@ -7,6 +7,19 @@
     <style>
         :root {
             color-scheme: light;
+            --bg: #f3f6ff;
+            --card: #ffffff;
+            --text: #14213d;
+            --muted: #5b6475;
+            --primary: #2f67f6;
+            --primary-dark: #2552c4;
+            --focus: #8fb0ff;
+            --success-bg: #ecfdf3;
+            --success-border: #33c07a;
+            --warning-bg: #fff7ed;
+            --warning-border: #fb923c;
+            --danger-bg: #fff1f2;
+            --danger-border: #ef4444;
         }
 
         * {
@@ -18,111 +31,231 @@
             min-height: 100vh;
             display: grid;
             place-items: center;
-            font-family: Arial, sans-serif;
-            background: #f4f7fb;
-            color: #1f2937;
+            padding: 20px;
+            font-family: Inter, Arial, sans-serif;
+            background: radial-gradient(circle at top, #eaf0ff 0%, var(--bg) 45%, #eef2ff 100%);
+            color: var(--text);
         }
 
         .card {
-            width: min(92vw, 420px);
-            background: #ffffff;
-            border-radius: 12px;
-            padding: 24px;
-            box-shadow: 0 10px 30px rgba(15, 23, 42, 0.12);
+            width: min(95vw, 520px);
+            background: var(--card);
+            border-radius: 18px;
+            padding: 28px;
+            box-shadow: 0 18px 40px rgba(31, 44, 86, 0.14);
         }
 
         h1 {
-            margin: 0 0 18px;
+            margin: 0;
             text-align: center;
-            font-size: 1.4rem;
+            font-size: 1.9rem;
+            letter-spacing: 0.2px;
+        }
+
+        .subtitle {
+            margin: 10px 0 24px;
+            text-align: center;
+            color: var(--muted);
+            font-size: 0.98rem;
         }
 
         form {
             display: grid;
-            gap: 12px;
+            gap: 16px;
         }
 
-        label {
+        .field {
+            display: grid;
+            gap: 8px;
+        }
+
+        .label-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
             font-size: 0.9rem;
             font-weight: 600;
         }
 
-        input {
+        .icon {
+            font-size: 1rem;
+        }
+
+        input,
+        select {
             width: 100%;
-            margin-top: 6px;
             border: 1px solid #d1d5db;
-            border-radius: 8px;
-            padding: 10px 12px;
-            font-size: 0.95rem;
+            border-radius: 10px;
+            padding: 13px 14px;
+            font-size: 1rem;
+            background: #fff;
+            outline: none;
+            transition: border-color 0.2s ease, box-shadow 0.2s ease;
+        }
+
+        input:focus,
+        select:focus {
+            border-color: var(--primary);
+            box-shadow: 0 0 0 4px var(--focus);
+        }
+
+        .helper {
+            margin: 2px 0 4px;
+            color: var(--muted);
+            font-size: 0.86rem;
         }
 
         button {
             border: 0;
-            border-radius: 8px;
-            padding: 11px 14px;
-            background: #2563eb;
+            border-radius: 10px;
+            padding: 13px 14px;
+            background: linear-gradient(135deg, #3f7bff 0%, var(--primary) 55%, #275de0 100%);
             color: #fff;
-            font-size: 0.95rem;
+            font-size: 1rem;
             font-weight: 600;
             cursor: pointer;
+            transition: transform 0.15s ease, box-shadow 0.2s ease, background 0.2s ease;
+            box-shadow: 0 8px 16px rgba(47, 103, 246, 0.3);
         }
 
         button:hover {
-            background: #1d4ed8;
+            background: linear-gradient(135deg, #4a85ff 0%, var(--primary-dark) 60%, #204bb5 100%);
+            transform: translateY(-1px) scale(1.01);
+            box-shadow: 0 10px 20px rgba(37, 82, 196, 0.35);
+        }
+
+        button:active {
+            transform: translateY(0) scale(0.99);
         }
 
         .result {
-            margin-top: 18px;
-            padding: 12px;
-            border-radius: 8px;
-            background: #eff6ff;
-            border: 1px solid #bfdbfe;
+            margin-top: 24px;
+            padding: 16px;
+            border-radius: 12px;
+            border: 1px solid #dbe2f0;
+            background: #f8faff;
+        }
+
+        .result h2 {
+            margin: 0 0 10px;
+            font-size: 1.1rem;
+        }
+
+        .result--success {
+            background: var(--success-bg);
+            border-color: var(--success-border);
+        }
+
+        .result--warning {
+            background: var(--warning-bg);
+            border-color: var(--warning-border);
+        }
+
+        .result--danger {
+            background: var(--danger-bg);
+            border-color: var(--danger-border);
         }
 
         .result p {
-            margin: 6px 0;
+            margin: 8px 0;
+            font-size: 0.97rem;
+        }
+
+        @media (max-width: 540px) {
+            .card {
+                padding: 20px;
+                border-radius: 14px;
+            }
+
+            h1 {
+                font-size: 1.55rem;
+            }
         }
     </style>
 </head>
 <body>
     <main class="card">
         <h1>Bus Arrival Prediction</h1>
+        <p class="subtitle">When the bus will really arrive</p>
 
         <form method="post">
-            <label for="bus_line">
-                Bus line
-                <input
-                    id="bus_line"
-                    name="bus_line"
-                    type="text"
-                    placeholder="e.g., L01"
-                    value="{{ bus_line }}"
-                    required
-                >
-            </label>
+            <div class="field">
+                <div class="label-row">
+                    <span class="icon">🚌</span>
+                    <label for="bus_line">Bus line</label>
+                </div>
+                <select id="bus_line" name="bus_line" required>
+                    {% for line in available_lines %}
+                        <option value="{{ line }}" {% if line == bus_line %}selected{% endif %}>
+                            {{ line }}
+                        </option>
+                    {% endfor %}
+                </select>
+            </div>
 
-            <label for="stop">
-                Stop ID or name
-                <input
-                    id="stop"
-                    name="stop"
-                    type="text"
-                    placeholder="e.g., Central Station"
-                    value="{{ stop }}"
-                    required
-                >
-            </label>
+            <div class="field">
+                <div class="label-row">
+                    <span class="icon">📍</span>
+                    <label for="stop">Stop</label>
+                </div>
+                <select id="stop" name="stop" required></select>
+            </div>
+
+            <p class="helper">Select a bus line and stop</p>
 
             <button type="submit">Predict Arrival</button>
         </form>
 
         {% if eta is not none %}
-            <section class="result">
-                <p><strong>ETA:</strong> {{ eta }} minutes</p>
-                <p><strong>Traffic level:</strong> {{ traffic_level|title }}</p>
-                <p><strong>Explanation:</strong> {{ explanation }}</p>
+            {% if eta is number %}
+                {% if eta <= 2 %}
+                    {% set result_class = "result result--success" %}
+                {% elif eta <= 5 %}
+                    {% set result_class = "result result--warning" %}
+                {% else %}
+                    {% set result_class = "result result--danger" %}
+                {% endif %}
+            {% else %}
+                {% set result_class = "result result--danger" %}
+            {% endif %}
+
+            <section class="{{ result_class }}">
+                <h2>Prediction Dashboard</h2>
+                <p><strong>🕒 ETA:</strong> {{ eta }}{% if eta is number %} minutes{% endif %}</p>
+                <p><strong>Bus line:</strong> {{ bus_line }}</p>
+                <p><strong>Stop:</strong> {{ stop }}</p>
+                <p><strong>🚦 Traffic level:</strong> {{ traffic_level|title }}</p>
+                <p><strong>ML model used:</strong> {{ "Yes" if model_used else "No" }}</p>
+                <p><strong>ℹ️ Explanation:</strong> {{ explanation }}</p>
             </section>
         {% endif %}
     </main>
+    <script>
+        const lineStopMap = {{ line_stop_map|tojson }};
+        const lineSelect = document.getElementById("bus_line");
+        const stopSelect = document.getElementById("stop");
+        const selectedStop = "{{ stop }}";
+
+        function renderStops() {
+            const lineId = lineSelect.value;
+            const stops = lineStopMap[lineId] || [];
+            stopSelect.innerHTML = "";
+
+            stops.forEach((item) => {
+                const option = document.createElement("option");
+                option.value = item.stop_id;
+                option.textContent = item.label;
+                stopSelect.appendChild(option);
+            });
+
+            const hasSelectedStop = stops.some((item) => item.stop_id === selectedStop);
+            if (hasSelectedStop) {
+                stopSelect.value = selectedStop;
+            }
+        }
+
+        lineSelect.addEventListener("change", renderStops);
+        renderStops();
+    </script>
 </body>
 </html>
