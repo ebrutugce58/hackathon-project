@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bus Arrival Prediction</title>
+    <style>
+        :root {
+            color-scheme: light;
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            min-height: 100vh;
+            display: grid;
+            place-items: center;
+            font-family: Arial, sans-serif;
+            background: #f4f7fb;
+            color: #1f2937;
+        }
+
+        .card {
+            width: min(92vw, 420px);
+            background: #ffffff;
+            border-radius: 12px;
+            padding: 24px;
+            box-shadow: 0 10px 30px rgba(15, 23, 42, 0.12);
+        }
+
+        h1 {
+            margin: 0 0 18px;
+            text-align: center;
+            font-size: 1.4rem;
+        }
+
+        form {
+            display: grid;
+            gap: 12px;
+        }
+
+        label {
+            font-size: 0.9rem;
+            font-weight: 600;
+        }
+
+        input {
+            width: 100%;
+            margin-top: 6px;
+            border: 1px solid #d1d5db;
+            border-radius: 8px;
+            padding: 10px 12px;
+            font-size: 0.95rem;
+        }
+
+        button {
+            border: 0;
+            border-radius: 8px;
+            padding: 11px 14px;
+            background: #2563eb;
+            color: #fff;
+            font-size: 0.95rem;
+            font-weight: 600;
+            cursor: pointer;
+        }
+
+        button:hover {
+            background: #1d4ed8;
+        }
+
+        .result {
+            margin-top: 18px;
+            padding: 12px;
+            border-radius: 8px;
+            background: #eff6ff;
+            border: 1px solid #bfdbfe;
+        }
+
+        .result p {
+            margin: 6px 0;
+        }
+    </style>
+</head>
+<body>
+    <main class="card">
+        <h1>Bus Arrival Prediction</h1>
+
+        <form method="post">
+            <label for="bus_line">
+                Bus line
+                <input
+                    id="bus_line"
+                    name="bus_line"
+                    type="text"
+                    placeholder="e.g., L01"
+                    value="{{ bus_line }}"
+                    required
+                >
+            </label>
+
+            <label for="stop">
+                Stop ID or name
+                <input
+                    id="stop"
+                    name="stop"
+                    type="text"
+                    placeholder="e.g., Central Station"
+                    value="{{ stop }}"
+                    required
+                >
+            </label>
+
+            <button type="submit">Predict Arrival</button>
+        </form>
+
+        {% if eta is not none %}
+            <section class="result">
+                <p><strong>ETA:</strong> {{ eta }} minutes</p>
+                <p><strong>Explanation:</strong> {{ explanation }}</p>
+            </section>
+        {% endif %}
+    </main>
+</body>
+</html>
