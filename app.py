@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import hashlib
 import math
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -290,7 +290,7 @@ def _normalize_traffic_arrivals(val: str) -> str | None:
         return "Low"
     if r == "moderate":
         return "Moderate"
-    if r in ("high", "congested"):
+    if r in ("high", "congested", "heavy"):
         return "Heavy"
     return None
 
@@ -376,6 +376,75 @@ def _select_arrivals_use(
 
 def _is_rush_hour(hour: int) -> bool:
     return (7 <= hour <= 9) or (16 <= hour <= 19)
+
+
+def _local_hour_from_client_ctx(client_ctx: dict[str, Any] | None) -> int:
+    """Local clock hour (0–23) aligned with the dashboard when client time is posted."""
+    if not client_ctx or client_ctx.get("client_now_ms") is None:
+        return datetime.now().hour
+    try:
+        ms = int(client_ctx["client_now_ms"])
+        tz_off = int(client_ctx.get("client_tz_offset") or 0)
+        utc_dt = datetime.fromtimestamp(ms / 1000.0, tz=timezone.utc)
+        local_naive = (utc_dt - timedelta(minutes=tz_off)).replace(tzinfo=None)
+        return int(local_naive.hour)
+    except Exception:
+        return datetime.now().hour
+
+
+def _traffic_level_dynamic(
+    baseline: str,
+    eta_minutes: int,
+    schedule_delta_min: int,
+    weather_label: str,
+    demand_badge: str,
+    line_id: str,
+    stop_id: str,
+) -> str:
+    """
+    Dashboard traffic: blend CSV baseline, delay vs schedule, weather, demand, ETA context,
+    and a deterministic route/stop mix so labels vary realistically across the network.
+    Returns Low, Moderate, or High (UI maps High to the existing heavy badge style).
+    """
+    b = (baseline or "Moderate").strip()
+    if b not in ("Low", "Moderate", "Heavy"):
+        nb = _normalize_traffic_arrivals(str(baseline).lower())
+        b = nb if nb else "Moderate"
+    base_score = {"Low": 20.0, "Moderate": 46.0, "Heavy": 72.0}.get(b, 46.0)
+
+    delay = float(schedule_delta_min)
+    delay_adj = max(-14.0, min(30.0, delay * 1.85))
+
+    w = (weather_label or "Clear").strip().lower()
+    wx_adj = {
+        "clear": 0.0,
+        "cloudy": 5.5,
+        "rain": 13.0,
+        "snow": 17.0,
+        "windy": 8.5,
+    }.get(w, 5.0)
+
+    db = (demand_badge or "dem-mod").strip().lower()
+    if db == "dem-high":
+        dem_adj = 19.0
+    elif db == "dem-low":
+        dem_adj = 0.0
+    else:
+        dem_adj = 10.5
+
+    eta_adj = max(0.0, min(12.0, (float(eta_minutes) - 18.0) * 0.35))
+
+    seed = int(hashlib.md5(f"{line_id}|{stop_id}".encode("utf-8")).hexdigest()[:8], 16)
+    variety = ((seed % 15) - 7) * 0.85
+
+    score = base_score + delay_adj + wx_adj + dem_adj + eta_adj + variety
+    score = max(0.0, min(100.0, score))
+
+    if score < 40.0:
+        return "Low"
+    if score < 65.0:
+        return "Moderate"
+    return "High"
 
 
 def _map_weather_display(raw: str) -> str:
@@ -533,78 +602,163 @@ def _format_clock_12h(dt: datetime) -> str:
     return f"{h12}:{dt.minute:02d} {ap}"
 
 
+def _parse_planned_departure_series(series: pd.Series) -> pd.Series:
+    """Robust datetime parsing for planned_departure (mixed CSV formats)."""
+    s = series.astype(str).str.strip()
+    parsed = pd.to_datetime(s, errors="coerce", utc=False)
+    mask = parsed.isna()
+    if mask.any():
+        alt = pd.to_datetime(s[mask], errors="coerce", dayfirst=False)
+        parsed.loc[mask] = alt
+    return parsed
+
+
+def _wall_clock_from_epoch_and_js_tz_offset(
+    client_now_ms: int, js_get_timezone_offset_minutes: int
+) -> tuple[date, int]:
+    """
+    Recover the user's local calendar date and seconds-since-local-midnight from epoch + JS
+    getTimezoneOffset() (minutes to add to local time to get UTC; local is behind UTC when positive).
+    """
+    utc_dt = datetime.fromtimestamp(client_now_ms / 1000.0, tz=timezone.utc)
+    local_naive = utc_dt - timedelta(minutes=js_get_timezone_offset_minutes)
+    local_naive = local_naive.replace(tzinfo=None)
+    d = local_naive.date()
+    sec = local_naive.hour * 3600 + local_naive.minute * 60 + local_naive.second
+    return d, sec
+
+
+def _arrival_seconds_pattern_from_trips(line_id: str, stop_id: str) -> list[int]:
+    """
+    Sorted unique seconds-since-midnight for scheduled arrival at stop (departure + travel offset).
+    """
+    if _trips_df is None or _trips_df.empty:
+        return []
+    offset_min = _minutes_offset_to_stop(line_id, stop_id)
+    offset_sec = int(round(offset_min * 60.0))
+    try:
+        sub = _trips_df[_trips_df["line_id"] == line_id].copy()
+        sub["pd"] = _parse_planned_departure_series(sub["planned_departure"])
+        sub = sub.dropna(subset=["pd"])
+        if sub.empty:
+            return []
+        secs: set[int] = set()
+        for ts in sub["pd"]:
+            dep = pd.Timestamp(ts).to_pydatetime()
+            arr = dep + timedelta(seconds=offset_sec)
+            sec_of_day = arr.hour * 3600 + arr.minute * 60 + arr.second
+            secs.add(int(sec_of_day))
+        return sorted(secs)
+    except Exception:
+        return []
+
+
+def _iter_next_arrival_epochs(
+    pattern_sec: list[int],
+    client_now_ms: int,
+    now_sec: int,
+    base_local_date: date,
+) -> list[tuple[date, int, int]]:
+    """
+    Yield up to 3 (calendar_date, seconds_since_midnight, epoch_ms) for upcoming arrivals.
+    """
+    if not pattern_sec:
+        return []
+    SEC_PER_DAY = 86400
+    out: list[tuple[date, int, int]] = []
+    for day_off in range(0, 14):
+        if len(out) >= 3:
+            break
+        day = base_local_date + timedelta(days=day_off)
+        for t in pattern_sec:
+            if day_off == 0 and t <= now_sec:
+                continue
+            delta_sec = day_off * SEC_PER_DAY - now_sec + t
+            if delta_sec <= 0:
+                continue
+            epoch_ms = client_now_ms + int(delta_sec * 1000)
+            out.append((day, t, epoch_ms))
+            if len(out) >= 3:
+                break
+    return out
+
+
+def _clock_from_local_date_and_seconds(d: date, sec: int) -> str:
+    sec = int(sec) % 86400
+    h = sec // 3600
+    rem = sec % 3600
+    m = rem // 60
+    s = rem % 60
+    return _format_clock_12h(datetime(d.year, d.month, d.day, h, m, s))
+
+
 def _next_arrivals_table(
     line_id: str,
     stop_id: str,
-    now: datetime,
+    client_ctx: dict[str, Any] | None,
     eta_minutes: int,
     headway_min: float | None,
 ) -> tuple[list[dict[str, Any]], str]:
     """
-    Next 3 arrival clock times at this stop: bus_trips departure times + offset from bus_stops,
-    projected onto today/tomorrow; gaps filled with headway. Primary row aligns with predicted ETA.
+    Next 3 upcoming arrivals from bus_trips timetable (planned_departure + travel to stop),
+    using the browser's local calendar time (epoch + getTimezoneOffset), not server wall clock.
+    Past times are excluded; if none remain today, continues with tomorrow's schedule.
     """
-    primary = now + timedelta(minutes=float(eta_minutes))
     hw = float(headway_min if headway_min is not None else 12.0)
     if hw < 1.0:
         hw = 12.0
 
-    offset = _minutes_offset_to_stop(line_id, stop_id)
-    candidates: list[datetime] = []
-    source = "Derived from ETA and scheduled headway (no trip times for this line)"
+    if client_ctx and client_ctx.get("client_now_ms") is not None:
+        client_now_ms = int(client_ctx["client_now_ms"])
+        tz_off = int(client_ctx.get("client_tz_offset") or 0)
+        base_date, now_sec = _wall_clock_from_epoch_and_js_tz_offset(client_now_ms, tz_off)
+    else:
+        now_dt = datetime.now()
+        client_now_ms = int(now_dt.timestamp() * 1000)
+        base_date = now_dt.date()
+        now_sec = now_dt.hour * 3600 + now_dt.minute * 60 + now_dt.second
+        tz_off = 0
 
-    if _trips_df is not None and not _trips_df.empty:
-        try:
-            t = _trips_df[_trips_df["line_id"] == line_id].copy()
-            t["pd"] = pd.to_datetime(t["planned_departure"], errors="coerce")
-            t = t.dropna(subset=["pd"])
-            uniq_hm: set[tuple[int, int]] = set()
-            for ts in t["pd"]:
-                dep = pd.Timestamp(ts)
-                arr = dep + pd.Timedelta(minutes=offset)
-                uniq_hm.add((int(arr.hour), int(arr.minute)))
-            for day_add in range(0, 4):
-                d = (now + timedelta(days=day_add)).date()
-                for h, m in sorted(uniq_hm):
-                    dt = datetime(d.year, d.month, d.day, h, m, 0)
-                    if dt > now:
-                        candidates.append(dt)
-            candidates = sorted(set(candidates))
-            if len(candidates) > 0:
-                source = "bus_trips.csv + bus_stops.csv (planned departures + travel to stop)"
-        except Exception:
-            candidates = []
+    pattern_sec = _arrival_seconds_pattern_from_trips(line_id, stop_id)
+    source = "bus_trips.csv + bus_stops.csv (planned departures + travel to stop)"
 
-    times: list[datetime] = [primary]
-    for c in candidates:
-        if len(times) >= 3:
-            break
-        if c > primary + timedelta(seconds=5):
-            times.append(c)
-    while len(times) < 3:
-        times.append(times[-1] + timedelta(minutes=hw))
+    if not pattern_sec:
+        source = "Scheduled headway (bus_trips had no parseable times for this line)"
+        eta_i = max(1, int(eta_minutes))
+        rows_fb: list[dict[str, Any]] = []
+        for i in range(3):
+            delta_sec = eta_i * 60 + int(i * hw * 60)
+            epoch_ms = client_now_ms + delta_sec * 1000
+            if client_ctx and client_ctx.get("client_now_ms") is not None:
+                utc = datetime.fromtimestamp(epoch_ms / 1000.0, tz=timezone.utc)
+                local_wall = (utc - timedelta(minutes=tz_off)).replace(tzinfo=None)
+            else:
+                local_wall = datetime.fromtimestamp(epoch_ms / 1000.0)
+            mins_away = max(0, int(math.ceil(delta_sec / 60.0)))
+            rows_fb.append(
+                {
+                    "epoch_ms": int(epoch_ms),
+                    "clock": _format_clock_12h(local_wall),
+                    "minutes_away": mins_away,
+                }
+            )
+        return rows_fb, source
 
-    rows: list[dict[str, Any]] = []
-    for a in times[:3]:
-        ms = int(a.timestamp() * 1000)
-        mins_away = max(0, int(math.ceil((a - now).total_seconds() / 60.0)))
+    scheduled = _iter_next_arrival_epochs(pattern_sec, client_now_ms, now_sec, base_date)
+    rows = []
+    for day, tsec, epoch_ms in scheduled:
+        clock = _clock_from_local_date_and_seconds(day, tsec)
+        rem_sec = max(0, (epoch_ms - client_now_ms) / 1000.0)
+        mins_away = max(0, int(math.ceil(rem_sec / 60.0)))
         rows.append(
             {
-                "epoch_ms": ms,
-                "clock": _format_clock_12h(a),
+                "epoch_ms": int(epoch_ms),
+                "clock": clock,
                 "minutes_away": mins_away,
             }
         )
 
-    return rows, source
-
-
-def _countdown_fields(now: datetime, eta_minutes: int) -> tuple[int, int]:
-    """predicted_at and eta_target wall-clock (ms since epoch, local naive)."""
-    predicted_at_ms = int(now.timestamp() * 1000)
-    target = now + timedelta(minutes=float(eta_minutes))
-    eta_target_ms = int(target.timestamp() * 1000)
-    return predicted_at_ms, eta_target_ms
+    return rows[:3], source
 
 
 def _route_stop_count(line_id: str) -> int | None:
@@ -668,32 +822,91 @@ def _confidence_reliability_label(pct: int) -> str:
     return "High"
 
 
-def _enrich_transit_ui(pred: dict[str, Any], line: str, stop_id: str) -> dict[str, Any]:
-    """Countdown anchor + next 3 arrivals for the dashboard (all prediction paths)."""
-    now = datetime.now()
-    eta_i = int(pred.get("eta_minutes", 12))
+def _client_context_from_form(form: Any) -> dict[str, Any] | None:
+    """Browser-submitted instant + JS getTimezoneOffset so timetables match the dashboard clock."""
+    if form is None:
+        return None
+    raw_ms = form.get("client_now_ms")
+    if raw_ms is None or str(raw_ms).strip() == "":
+        return None
+    try:
+        client_now_ms = int(float(str(raw_ms).strip()))
+    except (TypeError, ValueError):
+        return None
+    try:
+        tz_off = int(float(str(form.get("client_tz_offset") or "0")))
+    except (TypeError, ValueError):
+        tz_off = 0
+    return {"client_now_ms": client_now_ms, "client_tz_offset": tz_off}
+
+
+def _enrich_transit_ui(
+    pred: dict[str, Any],
+    line: str,
+    stop_id: str,
+    client_ctx: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Countdown anchor + next 3 arrivals; main ETA matches the first Next Arrivals row (timetable)."""
+    eta_from_pred = int(pred.get("eta_minutes", 12))
     sched = pred.get("scheduled_eta_minutes")
     try:
         hw_f = float(sched) if sched is not None else 12.0
     except (TypeError, ValueError):
         hw_f = 12.0
-    pred_ms, eta_ms = _countdown_fields(now, eta_i)
-    rows, src = _next_arrivals_table(line, stop_id, now, eta_i, hw_f)
+
+    if client_ctx and client_ctx.get("client_now_ms") is not None:
+        pred_ms = int(client_ctx["client_now_ms"])
+    else:
+        pred_ms = int(datetime.now().timestamp() * 1000)
+
+    rows, src = _next_arrivals_table(line, stop_id, client_ctx, eta_from_pred, hw_f)
+
+    eta_i = eta_from_pred
+    if rows:
+        eta_i = max(0, int(rows[0]["minutes_away"]))
+        eta_ms = int(rows[0]["epoch_ms"])
+    else:
+        eta_ms = pred_ms + eta_i * 60 * 1000
+
     out = dict(pred)
+    out["eta_minutes"] = eta_i
     out["predicted_at_ms"] = pred_ms
     out["eta_target_ms"] = eta_ms
     out["next_arrivals"] = rows
     out["next_arrivals_source"] = src
+
+    try:
+        sched_i = int(round(float(sched))) if sched is not None else int(round(hw_f))
+    except (TypeError, ValueError):
+        sched_i = 12
+    out["schedule_delta_min"] = int(eta_i - sched_i)
+
+    dyn_traffic = _traffic_level_dynamic(
+        str(out.get("traffic_level", "Moderate")),
+        eta_i,
+        out["schedule_delta_min"],
+        str(out.get("weather_condition") or "Clear"),
+        str(out.get("demand_badge") or "dem-mod"),
+        line,
+        stop_id,
+    )
+    out["traffic_level"] = dyn_traffic
+    lh = _local_hour_from_client_ctx(client_ctx)
+    out["peak_traffic_alert"] = dyn_traffic == "High"
+    out["rush_hour_overlap"] = bool(out["peak_traffic_alert"] and _is_rush_hour(lh))
+
+    out["recommendation"] = _recommendation_from_comparison(
+        sched_i,
+        eta_i,
+        dyn_traffic,
+        str(out.get("passenger_demand") or ""),
+    )
 
     n_stops = _route_stop_count(line)
     out["route_stop_count"] = n_stops
     out["route_topology_label"] = _route_topology_label(line)
 
     hist_med = _stop_median_minutes_to_next(line, stop_id)
-    try:
-        sched_i = int(round(float(sched))) if sched is not None else int(round(hw_f))
-    except (TypeError, ValueError):
-        sched_i = 12
     if hist_med is not None and not math.isnan(hist_med):
         out["stop_avg_eta_minutes"] = int(round(max(2.0, min(90.0, hist_med))))
         out["stop_avg_eta_source"] = "history"
@@ -1392,7 +1605,7 @@ def _apply_rf_eta_overrides(pred: dict[str, Any], line: str, stop_id: str) -> di
     return out
 
 
-def _predict(line: str, stop_id: str) -> dict[str, Any]:
+def _predict(line: str, stop_id: str, client_ctx: dict[str, Any] | None = None) -> dict[str, Any]:
     if _arrivals_df is None:
         pred = _simulate_prediction(line, stop_id)
     else:
@@ -1407,7 +1620,7 @@ def _predict(line: str, stop_id: str) -> dict[str, Any]:
         except Exception as exc:
             print(f"[RF] Model inference failed; using rule-based ETA. ({exc!r})")
 
-    return _enrich_transit_ui(pred, line, stop_id)
+    return _enrich_transit_ui(pred, line, stop_id, client_ctx)
 
 
 _init_data()
@@ -1430,7 +1643,12 @@ def index():
         elif stop_id not in valid_ids:
             error = "Please select a valid stop for that line."
         else:
-            prediction = _predict(line, stop_id)
+            prediction = _predict(line, stop_id, _client_context_from_form(request.form))
+
+    if prediction and prediction.get("predicted_at_ms") is not None:
+        server_now_ms = int(prediction["predicted_at_ms"])
+    else:
+        server_now_ms = int(datetime.now().timestamp() * 1000)
 
     html = render_template(
         "index.html",
@@ -1440,6 +1658,7 @@ def index():
         prediction=prediction,
         error=error,
         data_note=_load_note,
+        server_now_ms=server_now_ms,
     )
     resp = make_response(html)
     resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, Pragma: no-cache"
@@ -1448,4 +1667,4 @@ def index():
 
 
 if __name__ == "__main__":
-    app.run(debug=False, host="127.0.0.0", port=8000)
+    app.run(debug=False, host="127.0.0.1", port=8000)

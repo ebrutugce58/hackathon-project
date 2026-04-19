@@ -991,7 +991,9 @@
     <div class="layout-grid">
       <section class="glass-panel" aria-labelledby="form-title">
         <h2 id="form-title">Request</h2>
-        <form method="post" action="{{ url_for('index') }}" autocomplete="off">
+        <form method="post" action="{{ url_for('index') }}" id="predict-form" autocomplete="off">
+          <input type="hidden" name="client_now_ms" id="client_now_ms" value="" />
+          <input type="hidden" name="client_tz_offset" id="client_tz_offset" value="" />
           <label for="bus_line">Bus line</label>
           <select id="bus_line" name="bus_line" required>
             <option value="" disabled {% if not request.form.get('bus_line') %}selected{% endif %}>Select line…</option>
@@ -1056,7 +1058,7 @@
               <span id="local-date" class="dash-clock__date"></span>
             </div>
           </div>
-          <p class="dash-clock-hint">Uses your device’s local time for hour &amp; day matching.</p>
+          <p class="dash-clock-hint">Clock and countdowns use the server time sent with this page (stays in sync while the tab is open).</p>
 
           {% if prediction %}
           {% set W = prediction.weather_condition %}
@@ -1235,6 +1237,7 @@
   <script type="application/json" id="json-stops-by-line">{{ stops_by_line|tojson }}</script>
   <script type="application/json" id="json-route-preview-by-line">{{ route_preview_by_line|tojson }}</script>
   <script type="application/json" id="json-form-selection">{{ {'bus_line': request.form.get('bus_line') or '', 'stop_id': request.form.get('stop_id') or ''}|tojson }}</script>
+  <script type="application/json" id="json-server-time">{{ {"server_now_ms": server_now_ms}|tojson }}</script>
   <script type="application/json" id="json-transit-client">{% if prediction and prediction.eta_target_ms is defined %}{{ {'eta_target_ms': prediction.eta_target_ms}|tojson }}{% else %}null{% endif %}</script>
   <script>
     (function () {
@@ -1318,14 +1321,41 @@
         fillStops();
         updateRoutePreview();
       });
+
+      var predictForm = document.getElementById("predict-form");
+      if (predictForm) {
+        predictForm.addEventListener("submit", function () {
+          var d = new Date();
+          var cms = document.getElementById("client_now_ms");
+          var ctz = document.getElementById("client_tz_offset");
+          if (cms) cms.value = String(Date.now());
+          if (ctz) ctz.value = String(d.getTimezoneOffset());
+        });
+      }
     })();
 
     (function () {
-      function updateLocalClock() {
+      var srvEl = document.getElementById("json-server-time");
+      var serverNowMs = Date.now();
+      if (srvEl && srvEl.textContent) {
+        try {
+          var parsed = JSON.parse(srvEl.textContent);
+          if (typeof parsed.server_now_ms === "number") {
+            serverNowMs = parsed.server_now_ms;
+          }
+        } catch (e) {}
+      }
+      var clientAtSync = Date.now();
+      function alignedNowMs() {
+        return serverNowMs + (Date.now() - clientAtSync);
+      }
+      window.__alignedNowMs = alignedNowMs;
+
+      function updateServerClock() {
         var tEl = document.getElementById("local-clock");
         var dEl = document.getElementById("local-date");
         if (!tEl || !dEl) return;
-        var now = new Date();
+        var now = new Date(alignedNowMs());
         tEl.setAttribute("datetime", now.toISOString());
         tEl.textContent = now.toLocaleTimeString("en-US", {
           hour: "numeric",
@@ -1338,8 +1368,8 @@
           day: "numeric"
         });
       }
-      updateLocalClock();
-      setInterval(updateLocalClock, 1000);
+      updateServerClock();
+      setInterval(updateServerClock, 1000);
     })();
 
     (function () {
@@ -1354,51 +1384,21 @@
       }
       if (!client || typeof client.eta_target_ms !== "number") return;
 
+      function alignedNowMs() {
+        return typeof window.__alignedNowMs === "function" ? window.__alignedNowMs() : Date.now();
+      }
+
       var hint = document.getElementById("eta-tick-hint");
       var num = document.getElementById("eta-mins-main");
-      var MIN_AWAY_FULL = 120;
 
       function formatAwayLabel(arrivalMs, nowMs) {
         var rem = arrivalMs - nowMs;
         if (rem <= 0) return "Due now";
-        var mins = Math.ceil(rem / 60000);
-        var arrive = new Date(arrivalMs);
-        var nowD = new Date(nowMs);
-        var sameCalDay =
-          arrive.getFullYear() === nowD.getFullYear() &&
-          arrive.getMonth() === nowD.getMonth() &&
-          arrive.getDate() === nowD.getDate();
-        var startToday = new Date(nowD.getFullYear(), nowD.getMonth(), nowD.getDate());
-        var startArrive = new Date(arrive.getFullYear(), arrive.getMonth(), arrive.getDate());
-        var dayDiff = Math.round((startArrive - startToday) / 86400000);
-        var manyHours = mins >= MIN_AWAY_FULL || !sameCalDay;
-        if (!manyHours) {
-          return String(mins) + " min";
-        }
-        var timeStr = arrive.toLocaleTimeString("en-US", {
-          hour: "numeric",
-          minute: "2-digit",
-          hour12: true
-        });
-        if (dayDiff === 1) {
-          return "Tomorrow " + timeStr;
-        }
-        if (dayDiff === 0) {
-          return "Today " + timeStr;
-        }
-        return (
-          arrive.toLocaleDateString("en-US", {
-            weekday: "short",
-            month: "short",
-            day: "numeric"
-          }) +
-          " · " +
-          timeStr
-        );
+        return String(Math.ceil(rem / 60000)) + " min";
       }
 
       function tickTransit() {
-        var now = Date.now();
+        var now = alignedNowMs();
         var rem = client.eta_target_ms - now;
         if (num) {
           var mins = Math.max(0, Math.ceil(rem / 60000));
@@ -1422,6 +1422,11 @@
             var ep = parseInt(tr.getAttribute("data-epoch-ms"), 10);
             var span = tr.querySelector(".na-away-text");
             if (!span || isNaN(ep)) return;
+            if (ep < now) {
+              tr.style.display = "none";
+              return;
+            }
+            tr.style.display = "";
             span.textContent = formatAwayLabel(ep, now);
           });
         }
